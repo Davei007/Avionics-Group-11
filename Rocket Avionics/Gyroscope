@@ -1,0 +1,60 @@
+#include <Wire.h>
+
+#define MPU6050_ADDR 0x68
+#define PWR_MGMT_1   0x6B
+#define ACCEL_XOUT_H 0x3B
+
+int16_t accelX, accelY, accelZ;
+int16_t gyroX, gyroY, gyroZ;
+
+void mpu6050_init() {
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(PWR_MGMT_1);
+  Wire.write(0x00);
+  Wire.endTransmission();
+}
+
+void mpu6050_read() {
+  Wire.beginTransmission(MPU6050_ADDR);
+  Wire.write(ACCEL_XOUT_H);
+  Wire.endTransmission(false);
+
+  Wire.requestFrom(MPU6050_ADDR, 14);
+
+  accelX = (Wire.read() << 8) | Wire.read();
+  accelY = (Wire.read() << 8) | Wire.read();
+  accelZ = (Wire.read() << 8) | Wire.read();
+
+  Wire.read(); Wire.read(); // temperature
+
+  gyroX = (Wire.read() << 8) | Wire.read();
+  gyroY = (Wire.read() << 8) | Wire.read();
+  gyroZ = (Wire.read() << 8) | Wire.read();
+}
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial);
+
+  Serial.println("MPU6050 - Arduino Mbed OS");
+
+  // I2C pins are FIXED in Mbed core
+  Wire.begin();
+  Wire.setClock(400000);
+
+  mpu6050_init();
+}
+
+void loop() {
+  mpu6050_read();
+
+  Serial.print("Accel X: "); Serial.print(accelX);
+  Serial.print(" Y: "); Serial.print(accelY);
+  Serial.print(" Z: "); Serial.print(accelZ);
+
+  Serial.print(" | Gyro X: "); Serial.print(gyroX);
+  Serial.print(" Y: "); Serial.print(gyroY);
+  Serial.print(" Z: "); Serial.println(gyroZ);
+
+  delay(500);
+}
