@@ -1,0 +1,39 @@
+#include <SPI.h>
+#include <LoRa.h>
+#define SS   5
+#define RST  14
+#define DIO0 26
+
+void setup() {
+  SPI.begin(18, 19, 23, SS);
+  LoRa.setPins(SS, RST, DIO0);
+  Serial.begin(9600);
+  while (!Serial);
+
+  Serial.println("LoRa Receiver");
+
+  if (!LoRa.begin(433E6)) {
+    Serial.println("Starting LoRa failed!");
+    while (1);
+  }
+}
+
+void loop() {
+  // try to parse packet
+  int packetSize = LoRa.parsePacket();
+  if (packetSize) {
+    // received a packet
+    Serial.print("Received packet '");
+
+    // read packet
+    while (LoRa.available()) {
+      Serial.print((char)LoRa.read());
+    }
+
+    // print RSSI of packet
+    Serial.print("' with RSSI ");
+    Serial.println(LoRa.packetRssi());
+  }
+}
+
+// USING VSPI PINS IN ("DEVKIT ESP32 V4") DATASHEET
