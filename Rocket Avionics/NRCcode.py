@@ -164,7 +164,7 @@ def bmp_read_raw():
     raw_temp  = (data[3] << 12) | (data[4] << 4) | (data[5] >> 4)
     return raw_temp, raw_press
 
-def pressure_to_altitude(pressure_pa, sea_level_pa=101325.0):
+def pressure_to_altitude(pressure_pa, sea_level_pa=101500.0): #change sea_level_pa due to pressure difference in home and launch location
     return 44330.0 * (1.0 - (pressure_pa / sea_level_pa) ** (1.0 / 5.255))
 
 # ══════════════════════════════════════════════════════════
@@ -283,16 +283,16 @@ def display_status(temp, press, altitude, ax, ay, az, gx, gy, gz):
     oled.fill(0)
 
     # First block: environment
-    oled.text(f"T:{temp:.1f}C", 0, 0)
-    oled.text(f"P:{press/100:.0f}hPa", 0, 9)
-    oled.text(f"Apogee:{apogee:.1f}m", 0, 30) #C.Alt is the current altitude
+    oled.text(f"Temp:{temp:.1f} C", 0, 0)
+    oled.text(f"Pressure:{press/100:.0f}hPa", 0, 9)
+    oled.text(f"Apogee:{apogee:.1f}m", 0, 30) 
     oled.text(f"CurrentAlt:{altitude:.1f}m", 0, 21)
     # Second block: accel
 #     oled.text(f"Accel(X,Y):{ax:.1f},{ay:.1f}", 0,30)
 #     oled.text(f"Accel(Z):{az:.1f}", 0, 45)
 
     # Third block: gyro
-    oled.text(f"Gyro(x,y):{gx:.0f},{gy:.0f}", 0, 40)
+    oled.text(f"Gyro(x,y):{gx:0f},{gy:.0f}", 0, 40)
     oled.text(f"Gyro(z):{gz:.0f}", 0, 50)
     
     oled.show()
