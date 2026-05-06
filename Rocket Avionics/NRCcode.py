@@ -284,17 +284,17 @@ def display_status(temp, press, altitude, ax, ay, az, gx, gy, gz):
 
     # First block: environment
     oled.text(f"T:{temp:.1f}C", 0, 0)
-    oled.text(f"P:{press/100:.0f}hPa", 0, 10)
-    oled.text(f"Alt:{altitude:.1f}m", 0, 20)
-
+    oled.text(f"P:{press/100:.0f}hPa", 0, 9)
+    oled.text(f"Apogee:{apogee:.1f}m", 0, 30) #C.Alt is the current altitude
+    oled.text(f"CurrentAlt:{altitude:.1f}m", 0, 21)
     # Second block: accel
-    oled.text(f"A:{ax:.1f},{ay:.1f}", 0, 35)
-    oled.text(f"Z:{az:.1f}", 0, 45)
+#     oled.text(f"Accel(X,Y):{ax:.1f},{ay:.1f}", 0,30)
+#     oled.text(f"Accel(Z):{az:.1f}", 0, 45)
 
     # Third block: gyro
-    oled.text(f"G:{gx:.0f},{gy:.0f}", 64, 35)
-    oled.text(f"Z:{gz:.0f}", 64, 45)
-
+    oled.text(f"Gyro(x,y):{gx:.0f},{gy:.0f}", 0, 40)
+    oled.text(f"Gyro(z):{gz:.0f}", 0, 50)
+    
     oled.show()
 
 # ══════════════════════════════════════════════════════════
@@ -304,12 +304,17 @@ bmp_calib = bmp_read_calibration()
 bmp_init()
 bmi_init()
 
+apogee= float('-inf')
+
 while True:
     # BMP280
     raw_temp, raw_press = bmp_read_raw()
     temp, press = bmp_compensate(raw_temp, raw_press, bmp_calib)
     altitude = pressure_to_altitude(press)
-
+    
+    if altitude>apogee: 
+       apogee=altitude
+    
     # BMI270
     ax, ay, az = bmi_read_accel()
     gx, gy, gz = bmi_read_gyro()
@@ -317,8 +322,10 @@ while True:
     print(f"Temp:      {temp:.2f} °C")
     print(f"Pressure:  {press/100:.2f} hPa")
     print(f"Altitude:  {altitude:.2f} m")
+    print(f"Apogee:    {apogee:.2f}m")
     print(f"Accel:     X={ax:.2f}  Y={ay:.2f}  Z={az:.2f}  m/s²")
     print(f"Gyro:      X={gx:.1f}  Y={gy:.1f}  Z={gz:.1f}  °/s")
+    
     print("─" * 40)
     display_status(temp, press, altitude, ax, ay, az, gx, gy, gz)
     time.sleep(0.1)
@@ -330,30 +337,30 @@ while True:
 
 #-------------------------------------SD-----------------------------
 #import machine
-import os
-import sdcard
-
-# ── SD setup ─────────────────────
-spi = machine.SPI(
-    1,
-    sck=machine.Pin(10),
-    mosi=machine.Pin(11),
-    miso=machine.Pin(8)
-)
-
-cs = machine.Pin(9, machine.Pin.OUT)
-
-sd = sdcard.SDCard(spi, cs)
-vfs = os.VfsFat(sd)
-os.mount(vfs, "/sd")
-
-print("Mounted OK")
-
-# ── WRITE FILE ───────────────────
-with open("/sd/test2.txt", "w") as f:
-    f.write("Hello SD card2\n")
-
-print("Write done")
+# import os
+# import sdcard
+# 
+# # ── SD setup ─────────────────────
+# spi = machine.SPI(
+#     1,
+#     sck=machine.Pin(10),
+#     mosi=machine.Pin(11),
+#     miso=machine.Pin(8)
+# )
+# 
+# cs = machine.Pin(9, machine.Pin.OUT)
+# 
+# sd = sdcard.SDCard(spi, cs)
+# vfs = os.VfsFat(sd)
+# os.mount(vfs, "/sd")
+# 
+# print("Mounted OK")
+# 
+# # ── WRITE FILE ───────────────────
+# with open("/sd/test2.txt", "w") as f:
+#     f.write("Hello SD card2\n")
+# 
+# print("Write done")
 
 
 
