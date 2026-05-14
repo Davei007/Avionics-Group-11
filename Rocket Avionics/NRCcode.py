@@ -1,5 +1,3 @@
-
-
 # OLED driver
 from micropython import const
 import framebuf
@@ -292,7 +290,7 @@ def display_status(temp, press, altitude, ax, ay, az, gx, gy, gz):
 #     oled.text(f"Accel(Z):{az:.1f}", 0, 45)
 
     # Third block: gyro
-    oled.text(f"Gyro(x,y):{gx:0f},{gy:.0f}", 0, 40)
+    oled.text(f"Gyro(x,y):{gx:.0f},{gy:.0f}", 0, 40)
     oled.text(f"Gyro(z):{gz:.0f}", 0, 50)
     
     oled.show()
@@ -328,7 +326,7 @@ while True:
     
     print("─" * 40)
     display_status(temp, press, altitude, ax, ay, az, gx, gy, gz)
-    time.sleep(0.1)
+    time.sleep(0.01)
 
 
 
