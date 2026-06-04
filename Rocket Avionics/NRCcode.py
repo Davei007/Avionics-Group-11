@@ -77,10 +77,45 @@ class SSD1306_I2C(framebuf.FrameBuffer):
 #oled = SSD1306_I2C(128, 64, I2C)
 
 #-----------------
-from machine import I2C, Pin
+from machine import I2C, SPI, Pin
 import time
 import math
 import struct
+
+# ── SPI init ───────────────────────────────────────────────
+spi = SPI(0,
+          baudrate=1_000_000,
+          polarity=0,
+          phase=0,
+          sck=Pin(18),
+          mosi=Pin(19),
+          miso=Pin(16))
+
+cs = Pin(17, Pin.OUT)
+cs.value(1)
+
+# ── Register map ───────────────────────────────────────────
+REG_FIFO          = 0x00
+REG_OP_MODE       = 0x01
+REG_FRF_MSB       = 0x06
+REG_FRF_MID       = 0x07
+REG_FRF_LSB       = 0x08
+REG_PA_CONFIG     = 0x09
+REG_FIFO_ADDR_PTR = 0x0D
+REG_FIFO_TX_BASE  = 0x0E
+REG_IRQ_FLAGS     = 0x12
+REG_PAYLOAD_LEN   = 0x22
+REG_MODEM_CFG1    = 0x1D
+REG_MODEM_CFG2    = 0x1E
+REG_MODEM_CFG3    = 0x26
+REG_SYNC_WORD     = 0x39
+REG_VERSION       = 0x42
+REG_PA_DAC        = 0x4D
+
+# ── Modes ──────────────────────────────────────────────────
+MODE_SLEEP = 0x80   # LoRa + sleep
+MODE_STDBY = 0x81   # LoRa + standby
+MODE_TX    = 0x83   # LoRa + TX
 
 i2c = I2C(0, sda=Pin(4), scl=Pin(5), freq=400000)
 
@@ -143,7 +178,7 @@ def bmp_compensate(raw_temp, raw_press, calib):
     var1 = (1.0 + var1 / 32768.0) * dig_P1
     if var1 == 0:
         return temperature, 0
-    pressure = 1066950 - raw_press #change this for East Midlands
+    pressure = 1013250 - raw_press #change this for East Midlands
     pressure = ((pressure - var2 / 4096.0) * 6250.0) / var1
     var1 = dig_P9 * pressure * pressure / 2147483648.0
     var2 = pressure * dig_P8 / 32768.0
@@ -300,6 +335,118 @@ def display_status(temp, press, altitude, ax, ay, az, gx, gy, gz):
 #     oled.text(f"Gyro(z):{gz:.0f}", 0, 50)
     
     oled.show()
+    # ── Low-level SPI helpers ──────────────────────────────────
+def spi_write(reg, val):
+    cs.value(0)
+    spi.write(bytes([reg | 0x80, val]))
+    cs.value(1)
+
+def spi_read(reg):
+    cs.value(0)
+    spi.write(bytes([reg & 0x7F]))
+    result = spi.read(1)
+    cs.value(1)
+    return result[0]
+
+# ── Chip check ─────────────────────────────────────────────
+def check_chip():
+    ver = spi_read(REG_VERSION)
+    if ver != 0x12:
+        raise Exception(f"SX1278 not found — got {hex(ver)}, expected 0x12")
+    print(f"SX1278 detected OK (version={hex(ver)})")
+
+# ── Init ───────────────────────────────────────────────────
+def lora_init(freq_mhz=433.0):
+    check_chip()
+
+    # Switch to LoRa sleep mode first (required before changing mode bits)
+    spi_write(REG_OP_MODE, MODE_SLEEP)
+    time.sleep_ms(15)
+
+    # Set frequency
+    frf = int((freq_mhz * 1e6) / (32e6 / 524288))
+    spi_write(REG_FRF_MSB, (frf >> 16) & 0xFF)
+    spi_write(REG_FRF_MID, (frf >> 8)  & 0xFF)
+    spi_write(REG_FRF_LSB,  frf        & 0xFF)
+    print(f"Frequency set: {freq_mhz} MHz  (FRF={hex(frf)})")
+
+    # Standby before configuring modem
+    spi_write(REG_OP_MODE, MODE_STDBY)
+    time.sleep_ms(10)
+
+    # Modem config: BW=125kHz, CR=4/5, explicit header
+    spi_write(REG_MODEM_CFG1, 0x72)
+    # SF=7, normal mode, CRC on
+    spi_write(REG_MODEM_CFG2, 0x74)
+    # LNA AGC on, low data rate off
+    spi_write(REG_MODEM_CFG3, 0x04)
+
+    # PA: use PA_BOOST pin, output power +17 dBm (safe without antenna attached)
+    # Change to 0x8F / 0x87 for max +20 dBm only when antenna is connected
+    spi_write(REG_PA_CONFIG, 0x8F)   # ← 0x8F when antenna attached, 0x80 bare
+    spi_write(REG_PA_DAC,    0x84)   # ← 0x87 for +20dBm,            0x84 normal
+
+    # FIFO TX base address = 0
+    spi_write(REG_FIFO_TX_BASE,  0x00)
+    spi_write(REG_FIFO_ADDR_PTR, 0x00)
+
+    # Private LoRa network sync word
+    spi_write(REG_SYNC_WORD, 0x12)
+
+    print("SX1278 configured — ready to TX")
+
+# ── Transmit ───────────────────────────────────────────────
+def lora_send(data: bytes):
+    # Standby before loading FIFO
+    spi_write(REG_OP_MODE, MODE_STDBY)
+    time.sleep_ms(10)
+
+    # Reset FIFO pointer
+    spi_write(REG_FIFO_ADDR_PTR, 0x00)
+
+    # Write payload byte-by-byte into FIFO
+    for byte in data:
+        spi_write(REG_FIFO, byte)
+
+    # Tell chip how many bytes to send
+    spi_write(REG_PAYLOAD_LEN, len(data))
+
+    # Clear any stale IRQ flags
+    spi_write(REG_IRQ_FLAGS, 0xFF)
+
+    # Start transmission
+    spi_write(REG_OP_MODE, MODE_TX)
+
+    # Wait for TxDone (bit 3 of IRQ register), 5 s timeout
+    start = time.ticks_ms()
+    while True:
+        irq = spi_read(REG_IRQ_FLAGS)
+        if irq & 0x08:
+            print(f"TX done  → {data}")
+            break
+        if time.ticks_diff(time.ticks_ms(), start) > 5000:
+            print("TX timeout!")
+            break
+        time.sleep_ms(10)
+
+    # Clear flags, return to standby
+    spi_write(REG_IRQ_FLAGS, 0xFF)
+    spi_write(REG_OP_MODE, MODE_STDBY)
+
+# ── Register dump (useful for debugging) ───────────────────
+def dump_regs():
+    print("\n── Register dump ──────────────────")
+    print(f"  Version  (0x42): {hex(spi_read(0x42))}  ← should be 0x12")
+    print(f"  OpMode   (0x01): {hex(spi_read(0x01))}  ← 0x81 = LoRa standby")
+    print(f"  FRF_MSB  (0x06): {hex(spi_read(0x06))}")
+    print(f"  FRF_MID  (0x07): {hex(spi_read(0x07))}")
+    print(f"  FRF_LSB  (0x08): {hex(spi_read(0x08))}")
+    print(f"  PA_CFG   (0x09): {hex(spi_read(0x09))}")
+    print(f"  ModemCfg1(0x1D): {hex(spi_read(0x1D))}")
+    print(f"  ModemCfg2(0x1E): {hex(spi_read(0x1E))}")
+    print(f"  SyncWord (0x39): {hex(spi_read(0x39))}")
+    print("───────────────────────────────────\n")
+
 
 # ══════════════════════════════════════════════════════════
 # Main
@@ -335,7 +482,56 @@ while True:
     
     print("─" * 40)
     display_status(temp, press, altitude, ax, ay, az, gx, gy, gz)
-    time.sleep(0.1)
+    
+    print("Mounted OK")
+
+# ── WRITE FILE ───────────────────
+#     with open("/sd/flight.csv", "w") as f:
+#         f.write(
+#             "time,temp,pressure,altitude,"
+#             "apogee,ax,ay,az,gx,gy,gz\n"
+#         )
+# 
+#     def log_to_sd(
+#         temp,
+#         press,
+#         altitude,
+#         apogee,
+#         ax, ay, az,
+#         gx, gy, gz
+#     ):
+# 
+#         with open("/sd/flight.csv", "a") as f:
+# 
+#             f.write(
+#                 f"{time.ticks_ms()},"
+#                 f"{temp:.2f},"
+#                 f"{press:.2f},"
+#                 f"{altitude:.2f},"
+#                 f"{apogee:.2f},"
+#                 f"{ax:.2f},"
+#                 f"{ay:.2f},"
+#                 f"{az:.2f},"
+#                 f"{gx:.2f},"
+#                 f"{gy:.2f},"
+#                 f"{gz:.2f}\n"
+#             )
+
+    lora_init(freq_mhz=433.0)
+    dump_regs()
+
+    counter = 0
+
+    msg = (
+            f"Altitude:{altitude:.3f},"
+            f"Apogee:{apogee:.3f},"
+            f"Temperature:{temp:.1f},"
+            f"Accel(Z):{az:.1f}"
+    ).encode()
+    lora_send(msg)
+    counter += 1
+    
+    time.sleep(0.001)
 
 
 
@@ -345,52 +541,73 @@ while True:
 #-------------------------------------SD-----------------------------
 
 
-print("Mounted OK")
+# print("Mounted OK")
+# 
+# # ── WRITE FILE ───────────────────
+# with open("/sd/flight.csv", "w") as f:
+#     f.write(
+#         "time,temp,pressure,altitude,"
+#         "apogee,ax,ay,az,gx,gy,gz\n"
+#     )
+# 
+# def log_to_sd(
+#     temp,
+#     press,
+#     altitude,
+#     apogee,
+#     ax, ay, az,
+#     gx, gy, gz
+# ):
+# 
+#     with open("/sd/flight.csv", "a") as f:
+# 
+#         f.write(
+#             f"{time.ticks_ms()},"
+#             f"{temp:.2f},"
+#             f"{press:.2f},"
+#             f"{altitude:.2f},"
+#             f"{apogee:.2f},"
+#             f"{ax:.2f},"
+#             f"{ay:.2f},"
+#             f"{az:.2f},"
+#             f"{gx:.2f},"
+#             f"{gy:.2f},"
+#             f"{gz:.2f}\n"
+#         )
+# 
+# lora_init(freq_mhz=433.0)
+# dump_regs()
+# 
+# counter = 0
+# 
+# msg = (
+#         f"A:{altitude:.1f},"
+#         f"P:{apogee:.1f},"
+#         f"T:{temp:.1f},"
+#         f"AZ:{az:.1f}"
+# ).encode()
+# lora_send(msg)
+# counter += 1
+# time.sleep(2)
 
-# ── WRITE FILE ───────────────────
-with open("/sd/flight.csv", "w") as f:
-    f.write(
-        "time,temp,pressure,altitude,"
-        "apogee,ax,ay,az,gx,gy,gz\n"
-    )
-
-def log_to_sd(
-    temp,
-    press,
-    altitude,
-    apogee,
-    ax, ay, az,
-    gx, gy, gz
-):
-
-    with open("/sd/flight.csv", "a") as f:
-
-        f.write(
-            f"{time.ticks_ms()},"
-            f"{temp:.2f},"
-            f"{press:.2f},"
-            f"{altitude:.2f},"
-            f"{apogee:.2f},"
-            f"{ax:.2f},"
-            f"{ay:.2f},"
-            f"{az:.2f},"
-            f"{gx:.2f},"
-            f"{gy:.2f},"
-            f"{gz:.2f}\n"
-        )
 
 
 
-
-
-
-# #-----------------------------------LoRa-------------------------------
+#-----------------------------------LoRa-------------------------------
+# ══════════════════════════════════════════════════════════
+# Standalone SX1278 LoRa TX test
+# Wiring (SPI0):
+#   SCK  → GP18
+#   MOSI → GP19
+#   MISO → GP16
+#   CS   → GP17
+# ══════════════════════════════════════════════════════════
 # from machine import SPI, Pin
 # import time
-# 
-# # ── SPI setup ──────────────────────────────────────────────
+
+# # ── SPI init ───────────────────────────────────────────────
 # spi = SPI(0,
-#           baudrate=1000000,
+#           baudrate=1_000_000,
 #           polarity=0,
 #           phase=0,
 #           sck=Pin(18),
@@ -399,8 +616,31 @@ def log_to_sd(
 # 
 # cs = Pin(17, Pin.OUT)
 # cs.value(1)
+
+# # ── Register map ───────────────────────────────────────────
+# REG_FIFO          = 0x00
+# REG_OP_MODE       = 0x01
+# REG_FRF_MSB       = 0x06
+# REG_FRF_MID       = 0x07
+# REG_FRF_LSB       = 0x08
+# REG_PA_CONFIG     = 0x09
+# REG_FIFO_ADDR_PTR = 0x0D
+# REG_FIFO_TX_BASE  = 0x0E
+# REG_IRQ_FLAGS     = 0x12
+# REG_PAYLOAD_LEN   = 0x22
+# REG_MODEM_CFG1    = 0x1D
+# REG_MODEM_CFG2    = 0x1E
+# REG_MODEM_CFG3    = 0x26
+# REG_SYNC_WORD     = 0x39
+# REG_VERSION       = 0x42
+# REG_PA_DAC        = 0x4D
 # 
-# # ── SX1278 register write/read ─────────────────────────────
+# # ── Modes ──────────────────────────────────────────────────
+# MODE_SLEEP = 0x80   # LoRa + sleep
+# MODE_STDBY = 0x81   # LoRa + standby
+# MODE_TX    = 0x83   # LoRa + TX
+
+# # ── Low-level SPI helpers ──────────────────────────────────
 # def spi_write(reg, val):
 #     cs.value(0)
 #     spi.write(bytes([reg | 0x80, val]))
@@ -413,129 +653,120 @@ def log_to_sd(
 #     cs.value(1)
 #     return result[0]
 # 
-# # ── Registers ──────────────────────────────────────────────
-# REG_FIFO            = 0x00
-# REG_OP_MODE         = 0x01
-# REG_FRF_MSB         = 0x06
-# REG_FRF_MID         = 0x07
-# REG_FRF_LSB         = 0x08
-# REG_PA_CONFIG       = 0x09
-# REG_FIFO_ADDR_PTR   = 0x0D
-# REG_FIFO_TX_BASE    = 0x0E
-# REG_IRQ_FLAGS       = 0x12
-# REG_PAYLOAD_LENGTH  = 0x22
-# REG_MODEM_CONFIG1   = 0x1D
-# REG_MODEM_CONFIG2   = 0x1E
-# REG_MODEM_CONFIG3   = 0x26
-# REG_SYNC_WORD       = 0x39
-# REG_DIO_MAPPING1    = 0x40
-# REG_VERSION         = 0x42
-# REG_PA_DAC          = 0x4D
-# 
-# # ── Modes ──────────────────────────────────────────────────
-# MODE_SLEEP   = 0x80  # LoRa + sleep
-# MODE_STDBY   = 0x81  # LoRa + standby
-# MODE_TX      = 0x83  # LoRa + TX
+# # ── Chip check ─────────────────────────────────────────────
+# def check_chip():
+#     ver = spi_read(REG_VERSION)
+#     if ver != 0x12:
+#         raise Exception(f"SX1278 not found — got {hex(ver)}, expected 0x12")
+#     print(f"SX1278 detected OK (version={hex(ver)})")
 # 
 # # ── Init ───────────────────────────────────────────────────
 # def lora_init(freq_mhz=433.0):
-#     # Check version register
-#     ver = spi_read(REG_VERSION)
-#     if ver != 0x12:
-#         raise Exception(f"SX1278 not found, got: {hex(ver)}")
-#     print(f"SX1278 OK (ver={hex(ver)})")
+#     check_chip()
 # 
-#     # Must be in sleep mode to switch to LoRa
+#     # Switch to LoRa sleep mode first (required before changing mode bits)
 #     spi_write(REG_OP_MODE, MODE_SLEEP)
-#     time.sleep_ms(10)
+#     time.sleep_ms(15)
 # 
-#     # Set frequency (433 MHz default)
+#     # Set frequency
 #     frf = int((freq_mhz * 1e6) / (32e6 / 524288))
 #     spi_write(REG_FRF_MSB, (frf >> 16) & 0xFF)
 #     spi_write(REG_FRF_MID, (frf >> 8)  & 0xFF)
 #     spi_write(REG_FRF_LSB,  frf        & 0xFF)
+#     print(f"Frequency set: {freq_mhz} MHz  (FRF={hex(frf)})")
 # 
-#     # Standby before config
+#     # Standby before configuring modem
 #     spi_write(REG_OP_MODE, MODE_STDBY)
 #     time.sleep_ms(10)
 # 
-#     # Modem config:
-#     # BW=125kHz, CR=4/5, explicit header
-#     spi_write(REG_MODEM_CONFIG1, 0x72)
+#     # Modem config: BW=125kHz, CR=4/5, explicit header
+#     spi_write(REG_MODEM_CFG1, 0x72)
 #     # SF=7, normal mode, CRC on
-#     spi_write(REG_MODEM_CONFIG2, 0x74)
-#     # Low data rate optimize off, AGC on
-#     spi_write(REG_MODEM_CONFIG3, 0x04)
+#     spi_write(REG_MODEM_CFG2, 0x74)
+#     # LNA AGC on, low data rate off
+#     spi_write(REG_MODEM_CFG3, 0x04)
 # 
-#     # PA boost pin, max power, +17dBm
-#     spi_write(REG_PA_CONFIG, 0x80)		#<--------------------- this line should be (0x8F) for max power instead of 0x80 (can be changed only when antenna is attached)
-#     spi_write(REG_PA_DAC,    0x84)		#<--------------------- this line should have (0x87) for max power instead of 0x84 (can be changed only when antenna is attached)
+#     # PA: use PA_BOOST pin, output power +17 dBm (safe without antenna attached)
+#     # Change to 0x8F / 0x87 for max +20 dBm only when antenna is connected
+#     spi_write(REG_PA_CONFIG, 0x8F)   # ← 0x8F when antenna attached, 0x80 bare
+#     spi_write(REG_PA_DAC,    0x84)   # ← 0x87 for +20dBm,            0x84 normal
 # 
-#     # FIFO TX base at 0
-#     spi_write(REG_FIFO_TX_BASE, 0x00)
+#     # FIFO TX base address = 0
+#     spi_write(REG_FIFO_TX_BASE,  0x00)
 #     spi_write(REG_FIFO_ADDR_PTR, 0x00)
 # 
-#     # Sync word 0x12 = private LoRa network
+#     # Private LoRa network sync word
 #     spi_write(REG_SYNC_WORD, 0x12)
 # 
-#     print("SX1278 configured")
+#     print("SX1278 configured — ready to TX")
 # 
 # # ── Transmit ───────────────────────────────────────────────
 # def lora_send(data: bytes):
-#     # Go to standby
+#     # Standby before loading FIFO
 #     spi_write(REG_OP_MODE, MODE_STDBY)
 #     time.sleep_ms(10)
 # 
 #     # Reset FIFO pointer
 #     spi_write(REG_FIFO_ADDR_PTR, 0x00)
 # 
-#     # Write payload into FIFO
+#     # Write payload byte-by-byte into FIFO
 #     for byte in data:
 #         spi_write(REG_FIFO, byte)
 # 
-#     # Set payload length
-#     spi_write(REG_PAYLOAD_LENGTH, len(data))
+#     # Tell chip how many bytes to send
+#     spi_write(REG_PAYLOAD_LEN, len(data))
 # 
-#     # Clear IRQ flags
+#     # Clear any stale IRQ flags
 #     spi_write(REG_IRQ_FLAGS, 0xFF)
 # 
-#     # Start TX
+#     # Start transmission
 #     spi_write(REG_OP_MODE, MODE_TX)
 # 
-#     # Poll TxDone flag (bit 3 of IRQ register)
-#     timeout = 5000  # 5 seconds max
+#     # Wait for TxDone (bit 3 of IRQ register), 5 s timeout
 #     start = time.ticks_ms()
-#     
 #     while True:
 #         irq = spi_read(REG_IRQ_FLAGS)
-#         if irq & 0x08:  # TxDone bit
+#         if irq & 0x08:
+#             print(f"TX done  → {data}")
 #             break
-#         if time.ticks_diff(time.ticks_ms(), start) > timeout:
+#         if time.ticks_diff(time.ticks_ms(), start) > 5000:
 #             print("TX timeout!")
 #             break
-#         time.sleep(0.01)
+#         time.sleep_ms(10)
 # 
-#     # Clear flags and go back to standby
+#     # Clear flags, return to standby
 #     spi_write(REG_IRQ_FLAGS, 0xFF)
 #     spi_write(REG_OP_MODE, MODE_STDBY)
-#     print(f"Sent: {data}")
 # 
-# # ── Main ───────────────────────────────────────────────────
+# # ── Register dump (useful for debugging) ───────────────────
+# def dump_regs():
+#     print("\n── Register dump ──────────────────")
+#     print(f"  Version  (0x42): {hex(spi_read(0x42))}  ← should be 0x12")
+#     print(f"  OpMode   (0x01): {hex(spi_read(0x01))}  ← 0x81 = LoRa standby")
+#     print(f"  FRF_MSB  (0x06): {hex(spi_read(0x06))}")
+#     print(f"  FRF_MID  (0x07): {hex(spi_read(0x07))}")
+#     print(f"  FRF_LSB  (0x08): {hex(spi_read(0x08))}")
+#     print(f"  PA_CFG   (0x09): {hex(spi_read(0x09))}")
+#     print(f"  ModemCfg1(0x1D): {hex(spi_read(0x1D))}")
+#     print(f"  ModemCfg2(0x1E): {hex(spi_read(0x1E))}")
+#     print(f"  SyncWord (0x39): {hex(spi_read(0x39))}")
+#     print("───────────────────────────────────\n")
+
+# ══════════════════════════════════════════════════════════
+# Main — transmit a counter packet every 2 seconds
+# ══════════════════════════════════════════════════════════
 # lora_init(freq_mhz=433.0)
+# dump_regs()
 # 
 # counter = 0
-# 
-# msg = (
-#     f"A:{altitude:.1f},"
-#     f"P:{apogee:.1f},"
-#     f"T:{temp:.1f},"
-#     f"AZ:{az:.1f}"
-# ).encode()
-# lora_send(msg)
-# counter += 1
-# time.sleep(0.1)
-#     # Run this to verify SPI comms and chip registers
-# print(hex(spi_read(0x42)))  # Version — should print 0x12
-# print(hex(spi_read(0x01)))  # OpMode — should print 0x81 (standby)
-# print(hex(spi_read(0x06)))  # Frequency MSB — should match what you set
+# while True:
+#     msg = (
+#         f"A:{altitude:.1f},"
+#         f"P:{apogee:.1f},"
+#         f"T:{temp:.1f},"
+#         f"AZ:{az:.1f}"
+#     ).encode()
+#     lora_send(msg)
+#     counter += 1
+#     time.sleep(2)
 
