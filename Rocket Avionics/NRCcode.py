@@ -1,3 +1,5 @@
+
+
 # OLED driver
 from micropython import const
 import framebuf
@@ -141,7 +143,7 @@ def bmp_compensate(raw_temp, raw_press, calib):
     var1 = (1.0 + var1 / 32768.0) * dig_P1
     if var1 == 0:
         return temperature, 0
-    pressure = 1048576.0 - raw_press
+    pressure = 1066950 - raw_press #change this for East Midlands
     pressure = ((pressure - var2 / 4096.0) * 6250.0) / var1
     var1 = dig_P9 * pressure * pressure / 2147483648.0
     var2 = pressure * dig_P8 / 32768.0
@@ -282,24 +284,29 @@ def display_status(temp, press, altitude, ax, ay, az, gx, gy, gz):
 
     # First block: environment
     oled.text(f"Temp:{temp:.1f} C", 0, 0)
-    oled.text(f"Pressure:{press/100:.0f}hPa", 0, 9)
-    oled.text(f"Apogee:{apogee:.1f}m", 0, 30) 
-    oled.text(f"CurrentAlt:{altitude:.1f}m", 0, 21)
+    oled.text(f"Pressure:{press/100:.2f}hPa", 0, 9)
+    oled.text(f"CurrentAlt:{altitude:.3f}m", 0, 18)
+    oled.text(f"Apogee:{apogee:.3f}m", 0, 28) 
     # Second block: accel
-#     oled.text(f"Accel(X,Y):{ax:.1f},{ay:.1f}", 0,30)
-#     oled.text(f"Accel(Z):{az:.1f}", 0, 45)
+    oled.text(f"Acc(X):{ax:.1f}", 0,38)
+    oled.text(f"Acc(Y):{ay:.1f}", 0,48)
+    oled.text(f"Acc(Z):{az:.1f}", 0, 58)
+    # Ground lvl
+    #Apogee
+    #cureent alt
 
     # Third block: gyro
-    oled.text(f"Gyro(x,y):{gx:.0f},{gy:.0f}", 0, 40)
-    oled.text(f"Gyro(z):{gz:.0f}", 0, 50)
+#     oled.text(f"Gyro(x,y):{gx:.0f},{gy:.0f}", 0, 40)
+#     oled.text(f"Gyro(z):{gz:.0f}", 0, 50)
     
     oled.show()
 
 # ══════════════════════════════════════════════════════════
 # Main
 # ══════════════════════════════════════════════════════════
-bmp_calib = bmp_read_calibration()
 bmp_init()
+bmp_calib = bmp_read_calibration()                                                                         
+
 bmi_init()
 
 apogee= float('-inf')
@@ -316,6 +323,8 @@ while True:
     # BMI270
     ax, ay, az = bmi_read_accel()
     gx, gy, gz = bmi_read_gyro()
+    
+    #OLED      
 
     print(f"Temp:      {temp:.2f} °C")
     print(f"Pressure:  {press/100:.2f} hPa")
@@ -326,7 +335,7 @@ while True:
     
     print("─" * 40)
     display_status(temp, press, altitude, ax, ay, az, gx, gy, gz)
-    time.sleep(0.01)
+    time.sleep(0.1)
 
 
 
@@ -334,37 +343,47 @@ while True:
 
 
 #-------------------------------------SD-----------------------------
-#import machine
-# import os
-# import sdcard
-# 
-# # ── SD setup ─────────────────────
-# spi = machine.SPI(
-#     1,
-#     sck=machine.Pin(10),
-#     mosi=machine.Pin(11),
-#     miso=machine.Pin(8)
-# )
-# 
-# cs = machine.Pin(9, machine.Pin.OUT)
-# 
-# sd = sdcard.SDCard(spi, cs)
-# vfs = os.VfsFat(sd)
-# os.mount(vfs, "/sd")
-# 
-# print("Mounted OK")
-# 
-# # ── WRITE FILE ───────────────────
-# with open("/sd/test2.txt", "w") as f:
-#     f.write("Hello SD card2\n")
-# 
-# print("Write done")
+
+
+print("Mounted OK")
+
+# ── WRITE FILE ───────────────────
+with open("/sd/flight.csv", "w") as f:
+    f.write(
+        "time,temp,pressure,altitude,"
+        "apogee,ax,ay,az,gx,gy,gz\n"
+    )
+
+def log_to_sd(
+    temp,
+    press,
+    altitude,
+    apogee,
+    ax, ay, az,
+    gx, gy, gz
+):
+
+    with open("/sd/flight.csv", "a") as f:
+
+        f.write(
+            f"{time.ticks_ms()},"
+            f"{temp:.2f},"
+            f"{press:.2f},"
+            f"{altitude:.2f},"
+            f"{apogee:.2f},"
+            f"{ax:.2f},"
+            f"{ay:.2f},"
+            f"{az:.2f},"
+            f"{gx:.2f},"
+            f"{gy:.2f},"
+            f"{gz:.2f}\n"
+        )
 
 
 
 
 
-# 
+
 # #-----------------------------------LoRa-------------------------------
 # from machine import SPI, Pin
 # import time
@@ -486,6 +505,7 @@ while True:
 #     # Poll TxDone flag (bit 3 of IRQ register)
 #     timeout = 5000  # 5 seconds max
 #     start = time.ticks_ms()
+#     
 #     while True:
 #         irq = spi_read(REG_IRQ_FLAGS)
 #         if irq & 0x08:  # TxDone bit
@@ -493,7 +513,7 @@ while True:
 #         if time.ticks_diff(time.ticks_ms(), start) > timeout:
 #             print("TX timeout!")
 #             break
-#         time.sleep_ms(10)
+#         time.sleep(0.01)
 # 
 #     # Clear flags and go back to standby
 #     spi_write(REG_IRQ_FLAGS, 0xFF)
@@ -504,12 +524,18 @@ while True:
 # lora_init(freq_mhz=433.0)
 # 
 # counter = 0
-# while True:
-#     msg = f"hello {counter}".encode()
-#     lora_send(msg)
-#     counter += 1
-#     time.sleep(5)
+# 
+# msg = (
+#     f"A:{altitude:.1f},"
+#     f"P:{apogee:.1f},"
+#     f"T:{temp:.1f},"
+#     f"AZ:{az:.1f}"
+# ).encode()
+# lora_send(msg)
+# counter += 1
+# time.sleep(0.1)
 #     # Run this to verify SPI comms and chip registers
-#     print(hex(spi_read(0x42)))  # Version — should print 0x12
-#     print(hex(spi_read(0x01)))  # OpMode — should print 0x81 (standby)
-#     print(hex(spi_read(0x06)))  # Frequency MSB — should match what you set
+# print(hex(spi_read(0x42)))  # Version — should print 0x12
+# print(hex(spi_read(0x01)))  # OpMode — should print 0x81 (standby)
+# print(hex(spi_read(0x06)))  # Frequency MSB — should match what you set
+
