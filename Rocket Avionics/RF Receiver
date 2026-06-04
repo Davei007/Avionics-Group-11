@@ -1,39 +1,174 @@
-#include <SPI.h>
-#include <LoRa.h>
-#define SS   5
-#define RST  14
-#define DIO0 26
+# ══════════════════════════════════════════════════════════
+# SX1278 LoRa Receiver
+# Wiring (SPI0):
+#   SCK  → GP18
+#   MOSI → GP19
+#   MISO → GP16
+#   CS   → GP17
+# ══════════════════════════════════════════════════════════
+from machine import SPI, Pin
+import time
 
-void setup() {
-  SPI.begin(18, 19, 23, SS);
-  LoRa.setPins(SS, RST, DIO0);
-  Serial.begin(9600);
-  while (!Serial);
+# ── SPI init ───────────────────────────────────────────────
+spi = SPI(0,
+          baudrate=1_000_000,
+          polarity=0,
+          phase=0,
+          sck=Pin(18),
+          mosi=Pin(19),
+          miso=Pin(16))
 
-  Serial.println("LoRa Receiver");
+cs = Pin(17, Pin.OUT)
+cs.value(1)
+rst = Pin(7, Pin.OUT)   # replace X with whatever GPIO RST is wired to
 
-  if (!LoRa.begin(433E6)) {
-    Serial.println("Starting LoRa failed!");
-    while (1);
-  }
-}
+# ── Register map ───────────────────────────────────────────
+REG_FIFO                 = 0x00
+REG_OP_MODE              = 0x01
+REG_FRF_MSB              = 0x06
+REG_FRF_MID              = 0x07
+REG_FRF_LSB              = 0x08
+REG_FIFO_ADDR_PTR        = 0x0D
+REG_FIFO_RX_BASE         = 0x0F
+REG_FIFO_RX_CURRENT_ADDR = 0x10
+REG_IRQ_FLAGS            = 0x12
+REG_RX_NB_BYTES          = 0x13
+REG_MODEM_CONFIG1        = 0x1D
+REG_MODEM_CONFIG2        = 0x1E
+REG_MODEM_CONFIG3        = 0x26
+REG_SYNC_WORD            = 0x39
+REG_VERSION              = 0x42
 
-void loop() {
-  // try to parse packet
-  int packetSize = LoRa.parsePacket();
-  if (packetSize) {
-    // received a packet
-    Serial.print("Received packet '");
+# ── Modes ──────────────────────────────────────────────────
+MODE_SLEEP         = 0x80   # LoRa + sleep
+MODE_STDBY         = 0x81   # LoRa + standby
+MODE_RX_CONTINUOUS = 0x85   # LoRa + RX continuous
 
-    // read packet
-    while (LoRa.available()) {
-      Serial.print((char)LoRa.read());
-    }
+# ── Low-level SPI helpers ──────────────────────────────────
+def spi_write(reg, val):
+    cs.value(0)
+    spi.write(bytes([reg | 0x80, val]))
+    cs.value(1)
 
-    // print RSSI of packet
-    Serial.print("' with RSSI ");
-    Serial.println(LoRa.packetRssi());
-  }
-}
+def spi_read(reg):
+    cs.value(0)
+    spi.write(bytes([reg & 0x7F]))
+    result = spi.read(1)
+    cs.value(1)
+    return result[0]
 
-// USING VSPI PINS IN ("DEVKIT ESP32 V4") DATASHEET
+#----------------------------------
+def reset_chip():
+    rst.value(0)
+    time.sleep_ms(10)
+    rst.value(1)
+    time.sleep_ms(10)
+
+# ── Register dump ──────────────────────────────────────────
+def dump_regs():
+    print("\n── Register dump ──────────────────")
+    print(f"  Version    (0x42): {hex(spi_read(0x42))}  ← should be 0x12")
+    print(f"  OpMode     (0x01): {hex(spi_read(0x01))}  ← 0x85 = LoRa RX continuous")
+    print(f"  FRF_MSB    (0x06): {hex(spi_read(0x06))}")
+    print(f"  FRF_MID    (0x07): {hex(spi_read(0x07))}")
+    print(f"  FRF_LSB    (0x08): {hex(spi_read(0x08))}")
+    print(f"  ModemCfg1  (0x1D): {hex(spi_read(0x1D))}  ← should be 0x72")
+    print(f"  ModemCfg2  (0x1E): {hex(spi_read(0x1E))}  ← should be 0x74")
+    print(f"  ModemCfg3  (0x26): {hex(spi_read(0x26))}  ← should be 0x04")
+    print(f"  SyncWord   (0x39): {hex(spi_read(0x39))}  ← should be 0x12")
+    print(f"  FifoRxBase (0x0F): {hex(spi_read(0x0F))}  ← should be 0x00")
+    print(f"  IRQ Flags  (0x12): {hex(spi_read(0x12))}")
+    print("───────────────────────────────────\n")
+
+# ── Chip check ─────────────────────────────────────────────
+def check_chip():
+    ver = spi_read(REG_VERSION)
+    if ver != 0x12:
+        raise Exception(f"SX1278 not found — got {hex(ver)}, expected 0x12")
+    print(f"SX1278 detected OK (version={hex(ver)})")
+
+# ── Init ───────────────────────────────────────────────────
+def lora_init(freq_mhz=433.0):
+    reset_chip()        # ← must be first
+    time.sleep_ms(10)   # give chip time to boot
+    check_chip()        # now try reading version
+
+    # Must be in LoRa sleep before changing config
+    spi_write(REG_OP_MODE, MODE_SLEEP)
+    time.sleep_ms(15)
+
+    # Set frequency
+    frf = int((freq_mhz * 1e6) / (32e6 / 524288))
+    spi_write(REG_FRF_MSB, (frf >> 16) & 0xFF)
+    spi_write(REG_FRF_MID, (frf >> 8)  & 0xFF)
+    spi_write(REG_FRF_LSB,  frf        & 0xFF)
+    print(f"Frequency set: {freq_mhz} MHz  (FRF={hex(frf)})")
+
+    # Standby before configuring modem
+    spi_write(REG_OP_MODE, MODE_STDBY)
+    time.sleep_ms(10)
+
+    # BW=125kHz, CR=4/5, explicit header
+    spi_write(REG_MODEM_CONFIG1, 0x72)
+    # SF=7, normal mode, CRC on
+    spi_write(REG_MODEM_CONFIG2, 0x74)
+    # LNA AGC on, low data rate off
+    spi_write(REG_MODEM_CONFIG3, 0x04)
+
+    # Sync word — must match transmitter
+    spi_write(REG_SYNC_WORD, 0x12)
+
+    # Set RX base address and reset FIFO pointer
+    spi_write(REG_FIFO_RX_BASE, 0x00)
+    spi_write(REG_FIFO_ADDR_PTR, 0x00)
+
+    print("Receiver configured")
+
+# ── Start receiving ────────────────────────────────────────
+def start_receive():
+    spi_write(REG_FIFO_ADDR_PTR, 0x00)
+    spi_write(REG_OP_MODE, MODE_RX_CONTINUOUS)
+    print("Listening...")
+
+# ── Read a packet if one is ready ─────────────────────────
+def lora_receive():
+    irq = spi_read(REG_IRQ_FLAGS)
+
+    if irq & 0x40:  # RxDone
+        if irq & 0x20:  # CRC error
+            print("CRC error — packet discarded")
+            spi_write(REG_IRQ_FLAGS, 0xFF)
+            return None
+
+        length = spi_read(REG_RX_NB_BYTES)
+        current_addr = spi_read(REG_FIFO_RX_CURRENT_ADDR)
+        spi_write(REG_FIFO_ADDR_PTR, current_addr)
+
+        payload = bytearray()
+        for _ in range(length):
+            payload.append(spi_read(REG_FIFO))
+
+        spi_write(REG_IRQ_FLAGS, 0xFF)
+
+        try:
+            return payload.decode()
+        except:
+            return str(payload)
+
+    return None
+
+# ══════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════
+lora_init(433.0)
+dump_regs()        # ← confirm all registers look correct before listening
+start_receive()
+dump_regs()        # ← confirm OpMode is now 0x85 (RX continuous)
+
+while True:
+    packet = lora_receive()
+    if packet:
+        print("Received:")
+        print(packet)
+        print("────────────────")
+    time.sleep(0.01)
