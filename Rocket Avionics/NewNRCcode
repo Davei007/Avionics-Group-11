@@ -175,8 +175,26 @@ def bmp_read_raw():
     raw_temp  = (data[3]<<12)|(data[4]<<4)|(data[5]>>4)
     return raw_temp, raw_press
 
-def pressure_to_altitude(pressure_pa, sea_level_pa=101500.0):
+def pressure_to_altitude(pressure_pa, sea_level_pa=100340.0): #change sea_level_pa to match the launch location. Take the hPa and multiply is by 100
     return 44330.0*(1.0-(pressure_pa/sea_level_pa)**(1.0/5.255))
+
+
+
+# ── Ground level: sampled once at boot, never changes ─────
+def calibrate_ground_level(samples=20):
+    print("Sampling ground level...")
+    oled.fill(0)
+    oled.text("Calibrating...", 0, 28)
+    oled.show()
+    readings = []
+    for i in range(samples):
+        raw_temp, raw_press = bmp_read_raw()
+        _, press = bmp_compensate(raw_temp, raw_press, bmp_calib)
+        readings.append(pressure_to_altitude(press))
+        time.sleep_ms(50)
+    ground = sum(readings) / len(readings)
+    print(f"Ground level locked: {ground:.2f}m")
+    return ground  # fixed forever after this
 
 # ── BMI270 ────────────────────────────────────────────────
 BMI270_ADDR = 0x68
@@ -260,9 +278,9 @@ def display_status(temp, press, altitude, apogee):
     oled.fill(0)
     oled.text(f"Temp:{temp:.2f}C", 0, 0)
     oled.text(f"Press:{press/100:.1f}hPa", 0, 8)
-    oled.text(f"Alt:{altitude:.3f}m", 0, 22)
+    oled.text(f"C.Alt:{altitude:.3f}m", 0, 22)
     oled.text(f"Apogee:{apogee:.3f}m", 0, 33)
-    oled.text(f"Time: {time.ticks_ms()/1000:.1f}s", 0, 44)
+    oled.text(f"Time:{time.ticks_ms()/1000:.1f}s", 0, 44)
     oled.show()
 
 # ── LoRa helpers ──────────────────────────────────────────
@@ -314,6 +332,45 @@ def lora_send(data: bytes):
     
     
 
+# ── Buzzer setup ──────────────────────────────────────────
+buzzer = machine.PWM(Pin(7))  
+buzzer.freq(5000)
+buzzer.duty_u16(0)
+
+# ── Stillness detection variables ─────────────────────────
+ACCEL_THRESHOLD    = 1.0        # m/s² tolerance around 1g
+STILL_LIMIT_MS     = 4 * 60 * 1000  # min * sec * 1000
+still_since        = None
+buzzer_triggered   = False
+
+def check_still_buzzer(ax, ay, az):
+    global still_since, buzzer_triggered
+
+    magnitude = math.sqrt(ax**2 + ay**2 + az**2)
+
+    if abs(magnitude - 9.81) < ACCEL_THRESHOLD:
+        # Rocket is still
+        if still_since is None:
+            still_since = time.ticks_ms()  # start timer
+
+        elapsed = time.ticks_diff(time.ticks_ms(), still_since)
+
+        if elapsed >= STILL_LIMIT_MS and not buzzer_triggered:
+            print("Rocket still 5+ min — sounding buzzer")
+            buzzer_triggered = True
+
+        if buzzer_triggered:
+            buzzer.duty_u16(32768)   # buzzer on
+        else:
+            buzzer.duty_u16(0)       # buzzer off
+    else:
+        # Movement detected — reset everything
+        still_since      = None
+        buzzer_triggered = False
+        buzzer.duty_u16(0)
+    
+    
+
 
 
 # ══════════════════════════════════════════════════════════
@@ -324,7 +381,12 @@ bmp_calib = bmp_read_calibration()
 bmi_init()
 lora_init(freq_mhz=433.0)
 
-apogee = float('-inf')
+# ── Sample ground level once at boot, never touched again ─
+ground_level = calibrate_ground_level(samples=20)
+apogee=ground_level
+
+altitude = 0
+apogee= 0
 LOG_INTERVAL_MS = 100   # log every 100 ms — adjust as needed
 last_log = time.ticks_ms()
 start_time = time.ticks_ms()
@@ -332,16 +394,30 @@ start_time = time.ticks_ms()
 
 # ══════════════════════════════════════════════════════════
 # Main loop
-# ══════════════════════════════════════════════════════════
+# ═════════════════════════════════════════════════════════
 while True:
     # ── Read sensors ──────────────────────────────────────
     raw_temp, raw_press = bmp_read_raw()
     temp, press = bmp_compensate(raw_temp, raw_press, bmp_calib)
-    altitude = pressure_to_altitude(press)
-    if altitude > apogee:
-        apogee = altitude
+    
+    # ── Altitude relative to boot ground level ────────────
+    altitude = pressure_to_altitude(press)  # always relative, never resets
+    
+    #for apogee
+    height_above_ground = altitude - ground_level
+    APOGEE_DEADBAND = 0.5  # metres — only update if risen by more than this
+
+    if height_above_ground > apogee+APOGEE_DEADBAND:
+        apogee = height_above_ground
+
+
     ax, ay, az = bmi_read_accel()
     gx, gy, gz = bmi_read_gyro()
+    
+
+    # ── Still detection buzzer ─────────────────────────────
+    check_still_buzzer(ax, ay, az)
+
     
 
 
@@ -367,3 +443,4 @@ while True:
     lora_send(msg)
 
     time.sleep_ms(1)
+
